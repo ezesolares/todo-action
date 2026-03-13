@@ -1,0 +1,36 @@
+{
+  "Actions": [
+    {
+      "Icon": "icons/action",
+      "Name": "Tarea de Google",
+      "States": [
+        {
+          "Image": "icons/action",
+          "TitleAlignment": "middle",
+          "FontSize": "10"
+        }
+      ],
+      "Tooltip": "Muestra el título de una tarea específica de Google Tasks.",
+      "UUID": "com.opendeck.googletasks.showtask",
+      "PropertyInspectorPath": "pi/index.html"
+    }
+  ],
+  "Author": "Antigravity",
+  "CodePath": "index.js",
+  "Description": "Muestra el título de una tarea de Google Tasks en un icono (polling cada 5 min).",
+  "Icon": "icons/plugin",
+  "Name": "Google Tasks",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "4.1"
+  },
+  "Version": "1.0.0",
+  "OS": [
+    {
+      "Platform": "linux"
+    }
+  ],
+  "Nodejs": {
+    "Version": "20"
+  }
+}

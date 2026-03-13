@@ -1,0 +1,17 @@
+{
+  "name": "com.opendeck.googletasks",
+  "version": "1.0.0",
+  "description": "Google Tasks OpenDeck Plugin",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@googleapis/tasks": "^1.0.0",
+    "canvas": "^2.11.2",
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
