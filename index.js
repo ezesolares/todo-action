@@ -49,7 +49,7 @@ async function getAuthenticatedClient() {
 
 // --- Lógica de Renderizado Canvas ---
 function drawTaskImage(text, settings) {
-    const { fontFamily = 'Arial', fontSize = 12, maxCharsPerLine = 10 } = settings;
+    const { fontFamily = 'Verdana', fontSize = 12, maxCharsPerLine = 10 } = settings;
     const canvas = createCanvas(72, 72);
     const ctx = canvas.getContext('2d');
 
@@ -63,20 +63,12 @@ function drawTaskImage(text, settings) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    // Word Wrap
-    const words = text.split(' ');
+    // Character-based wrapping
+    const maxChars = parseInt(maxCharsPerLine);
     let lines = [];
-    let currentLine = '';
-
-    for (let word of words) {
-        if ((currentLine + word).length <= maxCharsPerLine) {
-            currentLine += (currentLine ? ' ' : '') + word;
-        } else {
-            if (currentLine) lines.push(currentLine);
-            currentLine = word;
-        }
+    for (let i = 0; i < text.length; i += maxChars) {
+        lines.push(text.substring(i, i + maxChars));
     }
-    if (currentLine) lines.push(currentLine);
 
     // Dibujar líneas centradas verticalmente
     const lineHeight = fontSize * 1.2;
@@ -97,23 +89,42 @@ async function updateTask(context, settings) {
 
     const tasksClient = tasks({ version: 'v1', auth });
     const taskIndex = parseInt(settings.taskIndex || 1) - 1;
+    const listId = settings.listId || null;
+    const onlyOpenTasks = settings.onlyOpenTasks === undefined ? true : (settings.onlyOpenTasks === 'true' || settings.onlyOpenTasks === true);
 
     try {
-        const res = await tasksClient.tasklists.list({ maxResults: 1 });
-        if (!res.data.items || res.data.items.length === 0) return;
+        let selectedListId = listId;
 
-        const listId = res.data.items[0].id;
+        // Si no hay lista seleccionada, buscamos la primera lista disponible
+        if (!selectedListId) {
+            const res = await tasksClient.tasklists.list({ maxResults: 1 });
+            if (!res.data.items || res.data.items.length === 0) return;
+            selectedListId = res.data.items[0].id;
+        }
+
         const tasksRes = await tasksClient.tasks.list({
-            tasklist: listId,
-            showCompleted: false,
-            maxResults: 10 // Ajustable
+            tasklist: selectedListId,
+            showCompleted: !onlyOpenTasks,
+            showHidden: false,
+            maxResults: 20 // Buffer para el índice
         });
 
-        const tasks = tasksRes.data.items || [];
-        if (tasks[taskIndex]) {
-            const taskTitle = tasks[taskIndex].title;
+        const taskItems = tasksRes.data.items || [];
+        if (taskItems[taskIndex]) {
+            const taskTitle = taskItems[taskIndex].title;
             const base64Image = drawTaskImage(taskTitle, settings);
 
+            ws.send(JSON.stringify({
+                event: 'setImage',
+                context: context,
+                payload: {
+                    image: `data:image/png;base64,${base64Image}`,
+                    target: 0
+                }
+            }));
+        } else {
+            // Imagen vacía o aviso si no hay tarea en ese índice
+            const base64Image = drawTaskImage(taskItems.length > 0 ? 'Índice fuera' : 'Sin tareas', settings);
             ws.send(JSON.stringify({
                 event: 'setImage',
                 context: context,
@@ -125,6 +136,27 @@ async function updateTask(context, settings) {
         }
     } catch (err) {
         console.error('Error al obtener tareas:', err);
+    }
+}
+
+async function fetchAndSendLists(context) {
+    const auth = await getAuthenticatedClient();
+    if (!auth) return;
+
+    try {
+        const tasksClient = tasks({ version: 'v1', auth });
+        const res = await tasksClient.tasklists.list();
+        const lists = (res.data.items || []).map(l => ({ id: l.id, title: l.title }));
+
+        ws.send(JSON.stringify({
+            event: 'sendToPropertyInspector',
+            context: context,
+            payload: {
+                lists: lists
+            }
+        }));
+    } catch (err) {
+        console.error('Error al obtener listas:', err);
     }
 }
 
@@ -150,6 +182,10 @@ ws.on('message', (data) => {
         const settings = payload.settings;
         actions.set(context, settings);
         updateTask(context, settings);
+    }
+
+    if (event === 'propertyInspectorDidAppear') {
+        fetchAndSendLists(context);
     }
 });
 
