@@ -9,7 +9,9 @@
   "dependencies": {
     "@googleapis/tasks": "^1.0.0",
     "canvas": "^2.11.2",
-    "ws": "^8.16.0"
+    "ws": "^8.16.0",
+    "opener": "^1.5.2",
+    "google-auth-library": "^9.6.3"
   },
   "engines": {
     "node": ">=20"

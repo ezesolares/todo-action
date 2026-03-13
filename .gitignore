@@ -1,0 +1,4 @@
+credentials*.json
+node_modules
+token.json
+com.opendeck.googletasks.*

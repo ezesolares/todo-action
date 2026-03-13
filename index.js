@@ -1,4 +1,5 @@
-const { google } = require('@googleapis/tasks');
+const { tasks } = require('@googleapis/tasks');
+const { OAuth2Client } = require('google-auth-library');
 const { createCanvas, registerFont } = require('canvas');
 const WebSocket = require('ws');
 const fs = require('fs');
@@ -11,10 +12,10 @@ const TOKEN_PATH = path.join(__dirname, 'token.json');
 const SCOPES = ['https://www.googleapis.com/auth/tasks.readonly'];
 
 // --- Argumentos de Stream Deck ---
-const args = process.argv.slice(2);
-const port = args[process.argv.findIndex(a => a === '-port') + 1];
-const uuid = args[process.argv.findIndex(a => a === '-pluginUUID') + 1];
-const registerEvent = args[process.argv.findIndex(a => a === '-registerEvent') + 1];
+const args = process.argv;
+const port = args[args.findIndex(a => a === '-port') + 1];
+const uuid = args[args.findIndex(a => a === '-pluginUUID') + 1];
+const registerEvent = args[args.findIndex(a => a === '-registerEvent') + 1];
 
 let ws = new WebSocket(`ws://127.0.0.1:${port}`);
 let actions = new Map(); // Mapa para seguir las instancias de acciones y sus configuraciones
@@ -32,7 +33,7 @@ async function getAuthenticatedClient() {
     const content = fs.readFileSync(CREDENTIALS_PATH);
     const keys = JSON.parse(content);
     const key = keys.installed || keys.web;
-    const auth = new google.auth.OAuth2(key.client_id, key.client_secret, key.redirect_uris[0]);
+    const auth = new OAuth2Client(key.client_id, key.client_secret, key.redirect_uris[0]);
 
     if (fs.existsSync(TOKEN_PATH)) {
         const token = fs.readFileSync(TOKEN_PATH);
@@ -94,7 +95,7 @@ async function updateTask(context, settings) {
     const auth = await getAuthenticatedClient();
     if (!auth) return;
 
-    const tasksClient = google.tasks({ version: 'v1', auth });
+    const tasksClient = tasks({ version: 'v1', auth });
     const taskIndex = parseInt(settings.taskIndex || 1) - 1;
 
     try {

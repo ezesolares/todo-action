@@ -1,4 +1,4 @@
-const { google } = require('@googleapis/tasks');
+const { OAuth2Client } = require('google-auth-library');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
@@ -25,35 +25,64 @@ async function authenticate() {
     const content = fs.readFileSync(CREDENTIALS_PATH);
     const keys = JSON.parse(content);
     const key = keys.installed || keys.web;
-    const oauth2Client = new google.auth.OAuth2(
+    
+    // Forzamos localhost:3000 para el helper para que sea predecible
+    const redirectUri = 'http://localhost:3000';
+    const oauth2Client = new OAuth2Client(
         key.client_id,
         key.client_secret,
-        'http://localhost:3000'
+        redirectUri
     );
 
     const authUrl = oauth2Client.generateAuthUrl({
         access_type: 'offline',
         scope: SCOPES,
+        prompt: 'consent' // Forzar consentimiento para asegurar el refresh token
     });
 
-    console.log('Abriendo el navegador para autenticación...');
+    console.log('--- PASO 1: Copia esta URL en tu navegador ---');
+    console.log(authUrl);
+    console.log('--------------------------------------------');
+    
+    // Intentar abrir automáticamente, pero si falla el enlace está arriba
     opener(authUrl);
 
+    console.log(`--- PASO 2: Escuchando en ${redirectUri} para recibir el código... ---`);
+
     const server = http.createServer(async (req, res) => {
+        const fullUrl = `http://localhost:3000${req.url}`;
+        console.log(`Petición recibida en el servidor: ${fullUrl}`);
+        
         try {
-            if (req.url.indexOf('/?code=') > -1) {
-                const qs = new url.URL(req.url, 'http://localhost:3000').searchParams;
-                const code = qs.get('code');
-                res.end('Autenticación exitosa! Puedes cerrar esta pestaña.');
-                server.close();
+            const urlParsed = new URL(fullUrl);
+            const code = urlParsed.searchParams.get('code');
+
+            if (code) {
+                console.log('Código detectado. Canjeando por tokens...');
+                
+                res.writeHead(200, { 'Content-Type': 'text/html' });
+                res.end('<h1>Autenticacion exitosa!</h1><p>Ya puedes volver a la terminal.</p>');
+                
                 const { tokens } = await oauth2Client.getToken(code);
                 fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
-                console.log('Token guardado en token.json');
+                
+                console.log('--- EXITO: Token guardado en token.json ---');
+                server.close(() => {
+                    console.log('Servidor de autenticación cerrado.');
+                    process.exit(0);
+                });
+            } else {
+                res.writeHead(200, { 'Content-Type': 'text/plain' });
+                res.end('Esperando el codigo de Google (no se detecto "code" en la URL)...');
             }
         } catch (e) {
-            console.error(e);
+            console.error('Error procesando el callback:', e);
+            res.writeHead(500);
+            res.end('Error interno.');
         }
-    }).listen(3000);
+    }).listen(3000, () => {
+        console.log('Servidor local iniciado en puerto 3000.');
+    });
 }
 
 authenticate();
