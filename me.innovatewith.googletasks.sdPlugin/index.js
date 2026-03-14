@@ -202,45 +202,48 @@ ws.on('message', (data) => {
     if (event === 'keyDown') {
         const taskData = currentTasksData.get(context);
         if (!taskData) {
-            exec(`kdialog --error "No hay datos de la tarea para este botón. Espera a que se refresque." --title "Google Tasks"`);
+            exec(`zenity --error --title="Google Tasks" --text="No hay datos de la tarea para este botón. Espera a que se refresque."`);
             return;
         }
 
-        // 1. Preguntar por el nuevo título
-        exec(`kdialog --title "Editar Tarea" --inputbox "Modificar título de la tarea:" "${taskData.title}"`, async (err, stdout) => {
-            if (err) return; // Cancelado o error
-            
-            const newTitle = stdout.trim();
-            if (!newTitle) return;
+        // Dialogo único con Zenity
+        const sanitizedTitle = taskData.title.replace(/"/g, '\\"');
+        const cmd = `zenity --entry --title="Gestionar Tarea" --text="Modifica el título o marca como completada:" --entry-text="${sanitizedTitle}" --ok-label="Actualizar Texto" --extra-button="Completada" --cancel-label="Cancelar"`;
 
-            // 2. Preguntar si se quiere completar
-            exec(`kdialog --title "Google Tasks" --yesno "Tarea: '${newTitle}'\n\n¿Deseas marcarla como COMPLETADA?"`, async (err2) => {
-                // Si err2 es null, el usuario pulsó "SÍ" (marcar como completada)
-                // Si err2 NO es null, el usuario pulsó "NO" (solo actualizar título)
-                const finalStatus = !err2 ? 'completed' : 'needsAction';
-                
-                const auth = await getAuthenticatedClient();
-                if (auth) {
-                    try {
-                        const tasksClient = tasks({ version: 'v1', auth });
-                        await tasksClient.tasks.patch({
-                            tasklist: taskData.listId,
-                            task: taskData.id,
-                            requestBody: {
-                                title: newTitle,
-                                status: finalStatus,
-                                completed: finalStatus === 'completed' ? new Date().toISOString() : null
-                            }
-                        });
-                        
-                        // Forzar actualización del icono
-                        const settings = actions.get(context) || {};
-                        updateTask(context, settings);
-                    } catch (e) {
-                        exec(`kdialog --error "Error al actualizar la tarea: ${e.message}" --title "Google Tasks"`);
-                    }
+        exec(cmd, async (err, stdout) => {
+            if (err) return; // Cancelado
+            
+            const result = stdout.trim();
+            let newTitle = taskData.title;
+            let finalStatus = 'needsAction';
+
+            if (result === 'Completada') {
+                finalStatus = 'completed';
+            } else {
+                newTitle = result;
+            }
+            
+            const auth = await getAuthenticatedClient();
+            if (auth) {
+                try {
+                    const tasksClient = tasks({ version: 'v1', auth });
+                    await tasksClient.tasks.patch({
+                        tasklist: taskData.listId,
+                        task: taskData.id,
+                        requestBody: {
+                            title: newTitle,
+                            status: finalStatus,
+                            completed: finalStatus === 'completed' ? new Date().toISOString() : null
+                        }
+                    });
+                    
+                    // Forzar actualización del icono
+                    const settings = actions.get(context) || {};
+                    updateTask(context, settings);
+                } catch (e) {
+                    exec(`zenity --error --title="Google Tasks" --text="Error al actualizar: ${e.message}"`);
                 }
-            });
+            }
         });
     }
 });
