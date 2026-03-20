@@ -84,8 +84,10 @@ function drawTaskImage(text, settings) {
     return canvas.toBuffer('image/png').toString('base64');
 }
 
+let lastRenderedData = new Map(); // Cache para evitar re-renderizados innecesarios
+
 // --- Lógica de Negocio: Obtener Tarea ---
-async function updateTask(context, settings) {
+async function updateTask(context, settings, force = false) {
     const auth = await getAuthenticatedClient();
     if (!auth) return;
 
@@ -108,43 +110,75 @@ async function updateTask(context, settings) {
             tasklist: selectedListId,
             showCompleted: !onlyOpenTasks,
             showHidden: false,
-            maxResults: 20 // Buffer para el índice
+            maxResults: 100 // Aumentamos para poder ordenar una lista mayor
         });
 
-        const taskItems = tasksRes.data.items || [];
-        if (taskItems[taskIndex]) {
-            const task = taskItems[taskIndex];
-            const taskTitle = task.title;
+        let taskItems = tasksRes.data.items || [];
+
+        // --- Lógica de Sorteo por Prioridad (IMP: X) ---
+        taskItems.sort((a, b) => {
+            const priorityRegex = /IMP:\s*(\d+)/i;
             
-            // Guardar datos para el editor
+            const matchA = (a.notes || '').match(priorityRegex);
+            const matchB = (b.notes || '').match(priorityRegex);
+            
+            const pA = matchA ? parseInt(matchA[1]) : Infinity;
+            const pB = matchB ? parseInt(matchB[1]) : Infinity;
+            
+            if (pA !== pB) {
+                return pA - pB; // Menor número = mayor prioridad
+            }
+            
+            // Si tienen la misma prioridad (o ninguna), mantenemos el orden original del API
+            return 0;
+        });
+
+        const task = taskItems[taskIndex] || { id: 'none', title: taskItems.length > 0 ? 'Índice fuera' : 'Sin tareas' };
+        const taskTitle = task.title;
+
+        // Comprobar si algo ha cambiado antes de renderizar
+        const renderSettings = {
+            fontFamily: settings.fontFamily || 'Verdana',
+            fontSize: settings.fontSize || 12,
+            maxCharsPerLine: settings.maxCharsPerLine || 10
+        };
+        const cacheKey = JSON.stringify({ 
+            taskId: task.id, 
+            title: taskTitle, 
+            taskIndex: settings.taskIndex,
+            listId: settings.listId,
+            onlyOpen: settings.onlyOpenTasks,
+            ...renderSettings 
+        });
+        
+        if (!force && lastRenderedData.get(context) === cacheKey) {
+            // No hay cambios, no renderizamos
+            return;
+        }
+
+        // Guardar datos para el editor
+        if (task.id !== 'none') {
             currentTasksData.set(context, {
                 id: task.id,
                 title: taskTitle,
                 listId: selectedListId
             });
-
-            const base64Image = drawTaskImage(taskTitle, settings);
-
-            ws.send(JSON.stringify({
-                event: 'setImage',
-                context: context,
-                payload: {
-                    image: `data:image/png;base64,${base64Image}`,
-                    target: 0
-                }
-            }));
-        } else {
-            // Imagen vacía o aviso si no hay tarea en ese índice
-            const base64Image = drawTaskImage(taskItems.length > 0 ? 'Índice fuera' : 'Sin tareas', settings);
-            ws.send(JSON.stringify({
-                event: 'setImage',
-                context: context,
-                payload: {
-                    image: `data:image/png;base64,${base64Image}`,
-                    target: 0
-                }
-            }));
         }
+
+        const base64Image = drawTaskImage(taskTitle, settings);
+
+        ws.send(JSON.stringify({
+            event: 'setImage',
+            context: context,
+            payload: {
+                image: `data:image/png;base64,${base64Image}`,
+                target: 0
+            }
+        }));
+
+        // Actualizar cache
+        lastRenderedData.set(context, cacheKey);
+
     } catch (err) {
         console.error('Error al obtener tareas:', err);
     }
@@ -186,13 +220,13 @@ ws.on('message', (data) => {
     if (event === 'willAppear') {
         const settings = payload.settings || {};
         actions.set(context, settings);
-        updateTask(context, settings);
+        updateTask(context, settings, true); // Forzar renderizado inicial
     }
 
     if (event === 'didReceiveSettings') {
         const settings = payload.settings;
         actions.set(context, settings);
-        updateTask(context, settings);
+        updateTask(context, settings, true); // Forzar cuando se cambian ajustes
     }
 
     if (event === 'propertyInspectorDidAppear') {
@@ -211,23 +245,33 @@ ws.on('message', (data) => {
         const cmd = `zenity --entry --title="Gestionar Tarea" --text="Modifica el título o marca como completada:" --entry-text="${sanitizedTitle}" --ok-label="Actualizar Texto" --extra-button="Completada" --cancel-label="Cancelar"`;
 
         exec(cmd, async (err, stdout) => {
-            if (err) return; // Cancelado
-            
             const result = stdout.trim();
+            console.log(`[Zenity] Salida del diálogo: "${result}"`);
+
+            if (err && !result) {
+                console.log(`[Zenity] Diálogo cancelado o error real: ${err.message}`);
+                return;
+            }
+            
             let newTitle = taskData.title;
             let finalStatus = 'needsAction';
 
             if (result === 'Completada') {
                 finalStatus = 'completed';
-            } else {
+                console.log(`[Update] Marcando tarea como COMPLETADA: ${taskData.id}`);
+            } else if (result) {
                 newTitle = result;
+                console.log(`[Update] Actualizando título a: "${newTitle}" para la tarea: ${taskData.id}`);
+            } else {
+                return; // Caso borde
             }
             
             const auth = await getAuthenticatedClient();
             if (auth) {
                 try {
                     const tasksClient = tasks({ version: 'v1', auth });
-                    await tasksClient.tasks.patch({
+                    console.log(`[API] Llamando a tasks.patch para tasklist: ${taskData.listId}, task: ${taskData.id}`);
+                    const patchRes = await tasksClient.tasks.patch({
                         tasklist: taskData.listId,
                         task: taskData.id,
                         requestBody: {
@@ -236,13 +280,17 @@ ws.on('message', (data) => {
                             completed: finalStatus === 'completed' ? new Date().toISOString() : null
                         }
                     });
+                    console.log(`[API] Respuesta de Google Tasks: ${patchRes.status} ${patchRes.statusText}`);
                     
                     // Forzar actualización del icono
                     const settings = actions.get(context) || {};
-                    updateTask(context, settings);
+                    updateTask(context, settings, true);
                 } catch (e) {
+                    console.error(`[API] Error al actualizar:`, e.response ? e.response.data : e.message);
                     exec(`zenity --error --title="Google Tasks" --text="Error al actualizar: ${e.message}"`);
                 }
+            } else {
+                console.error(`[Auth] No se pudo obtener el cliente autenticado.`);
             }
         });
     }
