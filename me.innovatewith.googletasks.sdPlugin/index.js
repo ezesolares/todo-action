@@ -40,6 +40,15 @@ async function getAuthenticatedClient() {
     if (fs.existsSync(TOKEN_PATH)) {
         const token = fs.readFileSync(TOKEN_PATH);
         auth.setCredentials(JSON.parse(token));
+
+        // Listener para guardar el token si Google lo refresca automáticamente
+        auth.on('tokens', (tokens) => {
+            console.log('[Auth] Token refrescado automáticamente, guardando...');
+            const currentToken = JSON.parse(fs.readFileSync(TOKEN_PATH));
+            const updatedToken = { ...currentToken, ...tokens };
+            fs.writeFileSync(TOKEN_PATH, JSON.stringify(updatedToken));
+        });
+
         return auth;
     }
 
@@ -151,11 +160,6 @@ async function updateTask(context, settings, force = false) {
             ...renderSettings 
         });
         
-        if (!force && lastRenderedData.get(context) === cacheKey) {
-            // No hay cambios, no renderizamos
-            return;
-        }
-
         // Guardar datos para el editor
         if (task.id !== 'none') {
             currentTasksData.set(context, {
@@ -163,6 +167,11 @@ async function updateTask(context, settings, force = false) {
                 title: taskTitle,
                 listId: selectedListId
             });
+        }
+
+        if (!force && lastRenderedData.get(context) === cacheKey) {
+            // No hay cambios, no renderizamos
+            return;
         }
 
         const base64Image = drawTaskImage(taskTitle, settings);
@@ -186,7 +195,14 @@ async function updateTask(context, settings, force = false) {
 
 async function fetchAndSendLists(context) {
     const auth = await getAuthenticatedClient();
-    if (!auth) return;
+    if (!auth) {
+        ws.send(JSON.stringify({
+            event: 'sendToPropertyInspector',
+            context: context,
+            payload: { error: 'No se pudo autenticar.' }
+        }));
+        return;
+    }
 
     try {
         const tasksClient = tasks({ version: 'v1', auth });
@@ -202,6 +218,11 @@ async function fetchAndSendLists(context) {
         }));
     } catch (err) {
         console.error('Error al obtener listas:', err);
+        ws.send(JSON.stringify({
+            event: 'sendToPropertyInspector',
+            context: context,
+            payload: { error: 'Error al obtener listas: ' + err.message }
+        }));
     }
 }
 
@@ -213,7 +234,7 @@ ws.on('open', () => {
     }));
 });
 
-ws.on('message', (data) => {
+ws.on('message', async (data) => {
     const json = JSON.parse(data);
     const { event, context, payload } = json;
 
@@ -233,10 +254,23 @@ ws.on('message', (data) => {
         fetchAndSendLists(context);
     }
 
+    if (event === 'sendToPlugin' && payload && payload.action === 'refreshLists') {
+        fetchAndSendLists(context);
+    }
+
     if (event === 'keyDown') {
-        const taskData = currentTasksData.get(context);
+        const settings = actions.get(context) || {};
+        let taskData = currentTasksData.get(context);
+
+        // Si no hay datos, intentamos un refresco inmediato antes de fallar
         if (!taskData) {
-            exec(`zenity --error --title="Google Tasks" --text="No hay datos de la tarea para este botón. Espera a que se refresque."`);
+            console.log(`[keyDown] Datos no encontrados para ${context}, intentando updateTask...`);
+            await updateTask(context, settings, true);
+            taskData = currentTasksData.get(context);
+        }
+
+        if (!taskData) {
+            exec(`zenity --error --title="Google Tasks" --text="No hay datos de la tarea para este botón. Reintenta ahora o espera a que se refresque."`);
             return;
         }
 
@@ -296,9 +330,9 @@ ws.on('message', (data) => {
     }
 });
 
-// Polling cada 5 minutos
+// Polling cada 1 minuto
 setInterval(() => {
     actions.forEach((settings, context) => {
         updateTask(context, settings);
     });
-}, 5 * 60 * 1000);
+}, 1 * 60 * 1000);

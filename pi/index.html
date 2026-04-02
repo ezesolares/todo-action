@@ -9,7 +9,14 @@
         .sdpi-item { display: flex; align-items: center; margin-bottom: 10px; }
         .sdpi-item-label { width: 40%; font-size: 11px; }
         .sdpi-item-value { width: 60%; background: #3d3d3d; border: 1px solid #555; color: white; padding: 4px; }
+        input[type="number"], input[type="text"], select { height: 25px; box-sizing: border-box; }
         input[type="checkbox"] { width: auto; margin-right: 5px; }
+        .refresh-btn { 
+            width: 30px; margin-left: 5px; background: #555; color: white; border: 1px solid #777; cursor: pointer; font-size: 14px;
+            display: flex; justify-content: center; align-items: center; height: 25px;
+        }
+        .refresh-btn:hover { background: #666; }
+        .error-msg { color: #ff5555; font-size: 10px; margin-top: 5px; display: none; }
     </style>
 </head>
 <body>
@@ -19,7 +26,10 @@
             <select class="sdpi-item-value" id="listId" onchange="sendSettings()">
                 <option value="">Cargando listas...</option>
             </select>
+            <button class="refresh-btn" onclick="refreshLists()" title="Recargar listas">🔄</button>
         </div>
+        <div id="errorDisplay" class="error-msg"></div>
+
         <div class="sdpi-item">
             <div class="sdpi-item-label">Índice Tarea</div>
             <input class="sdpi-item-value" type="number" id="taskIndex" value="1" min="1" onchange="sendSettings()">
@@ -53,6 +63,8 @@
             actionInfo = JSON.parse(inActionInfo);
             settings = actionInfo.payload.settings;
 
+            console.log("PI: Conectando...", {uuid, settings});
+
             // Cargar settings actuales en la UI
             if (settings.listId) document.getElementById('listId').value = settings.listId;
             if (settings.taskIndex) document.getElementById('taskIndex').value = settings.taskIndex;
@@ -65,12 +77,27 @@
             websocket.onopen = function () {
                 var json = { event: inRegisterEvent, uuid: inUUID };
                 websocket.send(JSON.stringify(json));
+                console.log("PI: Registrado.");
             };
 
             websocket.onmessage = function (evt) {
                 const jsonObj = JSON.parse(evt.data);
+                console.log("PI: Mensaje recibido:", jsonObj.event, jsonObj.payload);
+
                 if (jsonObj.event === 'sendToPropertyInspector') {
                     const payload = jsonObj.payload;
+                    const errorDisplay = document.getElementById('errorDisplay');
+                    
+                    if (payload.error) {
+                        errorDisplay.innerText = payload.error;
+                        errorDisplay.style.display = 'block';
+                        const select = document.getElementById('listId');
+                        select.innerHTML = '<option value="">Error al cargar</option>';
+                        return;
+                    }
+
+                    errorDisplay.style.display = 'none';
+
                     if (payload.lists) {
                         const select = document.getElementById('listId');
                         const currentVal = settings.listId || select.value;
@@ -82,9 +109,24 @@
                             if (list.id === currentVal) option.selected = true;
                             select.appendChild(option);
                         });
+                        console.log("PI: Listas actualizadas.");
                     }
                 }
             };
+        }
+
+        function refreshLists() {
+            console.log("PI: Solicitando refresco...");
+            if (websocket && websocket.readyState === 1) {
+                const select = document.getElementById('listId');
+                select.innerHTML = '<option value="">Cargando...</option>';
+                const json = {
+                    event: 'sendToPlugin',
+                    context: uuid,
+                    payload: { action: 'refreshLists' }
+                };
+                websocket.send(JSON.stringify(json));
+            }
         }
 
         function sendSettings() {
@@ -97,6 +139,7 @@
                     fontSize: document.getElementById('fontSize').value,
                     maxCharsPerLine: document.getElementById('maxCharsPerLine').value
                 };
+                console.log("PI: Guardando settings:", settings);
                 const json = {
                     event: 'setSettings',
                     context: uuid,
