@@ -111,7 +111,15 @@ async function updateTask(context, settings, force = false) {
         // Si no hay lista seleccionada, buscamos la primera lista disponible
         if (!selectedListId) {
             const res = await tasksClient.tasklists.list({ maxResults: 1 });
-            if (!res.data.items || res.data.items.length === 0) return;
+            if (!res.data.items || res.data.items.length === 0) {
+                const base64Image = drawTaskImage('Sin listas', settings);
+                ws.send(JSON.stringify({
+                    event: 'setImage',
+                    context: context,
+                    payload: { image: `data:image/png;base64,${base64Image}`, target: 0 }
+                }));
+                return;
+            }
             selectedListId = res.data.items[0].id;
         }
 
@@ -142,7 +150,7 @@ async function updateTask(context, settings, force = false) {
             return 0;
         });
 
-        const task = taskItems[taskIndex] || { id: 'none', title: taskItems.length > 0 ? 'Índice fuera' : 'Sin tareas' };
+        const task = taskItems[taskIndex] || { id: 'none', title: 'Sin tareas' };
         const taskTitle = task.title;
 
         // Comprobar si algo ha cambiado antes de renderizar

@@ -132,7 +132,23 @@ async function updateTask(context, settings, force = false) {
 
         let taskItems = tasksRes.data.items || [];
 
-        // ... (lógica de ordenación omitida para brevedad en el match, pero se mantiene) ...
+        // --- Lógica de Sorteo por Prioridad (IMP: X) ---
+        taskItems.sort((a, b) => {
+            const priorityRegex = /IMP:\s*(\d+)/i;
+            
+            const matchA = (a.notes || '').match(priorityRegex);
+            const matchB = (b.notes || '').match(priorityRegex);
+            
+            const pA = matchA ? parseInt(matchA[1]) : Infinity;
+            const pB = matchB ? parseInt(matchB[1]) : Infinity;
+            
+            if (pA !== pB) {
+                return pA - pB; // Menor número = mayor prioridad
+            }
+            
+            // Si tienen la misma prioridad (o ninguna), mantenemos el orden original del API
+            return 0;
+        });
 
         const task = taskItems[taskIndex] || { id: 'none', title: 'Sin tareas' };
         const taskTitle = task.title;
