@@ -21,6 +21,40 @@ const registerEvent = args[args.findIndex(a => a === '-registerEvent') + 1];
 let ws = new WebSocket(`ws://127.0.0.1:${port}`);
 let actions = new Map(); // Mapa para seguir las instancias de acciones y sus configuraciones
 let currentTasksData = new Map(); // Mapa para guardar los datos de la tarea actual por context
+let isAuthenticating = false;
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- Automatización de Re-autenticación ---
+function triggerAutoAuth() {
+    if (isAuthenticating) return;
+    isAuthenticating = true;
+
+    console.warn('[Auth] Detectado token inválido. Iniciando recuperación automática...');
+
+    // Notificar al usuario proactivamente
+    const zenityCmd = `zenity --info --title="Google Tasks" --text="Tu sesión de Google ha expirado.\n\nSe abrirá el navegador automáticamente para que vuelvas a iniciar sesión y restaurar la conexión." --timeout=30`;
+    
+    exec(zenityCmd, () => {
+        console.log('[Auth] Lanzando auth-helper.js...');
+        
+        // Ejecutar el script de ayuda
+        exec('node auth-helper.js', async (error, stdout, stderr) => {
+            isAuthenticating = false;
+            if (error) {
+                console.error(`[Auth] Error el auto-auth: ${error.message}`);
+                return;
+            }
+            console.log('[Auth] Re-autenticación completada. Refrescando botones secuencialmente...');
+            
+            // Refrescar todos los botones activos de forma SECUENCIAL para evitar SEGV en Node 22
+            for (const [context, settings] of actions.entries()) {
+                await updateTask(context, settings, true);
+                await sleep(100); // Pequeña pausa para liberar presión de memoria
+            }
+        });
+    });
+}
 
 // --- Lógica de Autenticación de Google ---
 async function getAuthenticatedClient() {
@@ -198,6 +232,9 @@ async function updateTask(context, settings, force = false) {
 
     } catch (err) {
         console.error('Error al obtener tareas:', err);
+        if (err.message && err.message.includes('invalid_grant')) {
+            triggerAutoAuth();
+        }
     }
 }
 
@@ -226,10 +263,17 @@ async function fetchAndSendLists(context) {
         }));
     } catch (err) {
         console.error('Error al obtener listas:', err);
+        let errorMsg = 'Error al obtener listas: ' + err.message;
+        
+        if (err.message && err.message.includes('invalid_grant')) {
+            errorMsg = 'Error: Sesión expirada. Iniciando recuperación automática...';
+            triggerAutoAuth();
+        }
+
         ws.send(JSON.stringify({
             event: 'sendToPropertyInspector',
             context: context,
-            payload: { error: 'Error al obtener listas: ' + err.message }
+            payload: { error: errorMsg }
         }));
     }
 }
@@ -328,8 +372,13 @@ ws.on('message', async (data) => {
                     const settings = actions.get(context) || {};
                     updateTask(context, settings, true);
                 } catch (e) {
+                    let errorMsg = e.message;
+                    if (e.message && e.message.includes('invalid_grant')) {
+                        errorMsg = 'Error: Sesión expirada. Re-autentica en el navegador.';
+                        triggerAutoAuth();
+                    }
                     console.error(`[API] Error al actualizar:`, e.response ? e.response.data : e.message);
-                    exec(`zenity --error --title="Google Tasks" --text="Error al actualizar: ${e.message}"`);
+                    exec(`zenity --error --title="Google Tasks" --text="Error al actualizar: ${errorMsg}"`);
                 }
             } else {
                 console.error(`[Auth] No se pudo obtener el cliente autenticado.`);
@@ -338,9 +387,10 @@ ws.on('message', async (data) => {
     }
 });
 
-// Polling cada 1 minuto
-setInterval(() => {
-    actions.forEach((settings, context) => {
-        updateTask(context, settings);
-    });
+// Polling cada 1 minuto - Procesado secuencial para estabilidad
+setInterval(async () => {
+    for (const [context, settings] of actions.entries()) {
+        await updateTask(context, settings);
+        await sleep(50); // Pausa breve entre refrescos
+    }
 }, 1 * 60 * 1000);
