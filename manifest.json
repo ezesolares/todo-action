@@ -15,7 +15,7 @@
       "PropertyInspectorPath": "pi/index.html"
     }
   ],
-  "Author": "Antigravity",
+  "Author": "Ramiro Tasquer + IA",
   "CodePath": "index.js",
   "Description": "Muestra el título de una tarea de Google Tasks en un icono (polling cada 5 min).",
   "Icon": "icons/plugin",
