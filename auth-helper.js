@@ -7,18 +7,36 @@ const opener = require('opener');
 
 const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json');
 const TOKEN_PATH = path.join(__dirname, 'token.json');
+const LOG_PATH = path.join(__dirname, 'plugin.log');
 const SCOPES = ['https://www.googleapis.com/auth/tasks'];
+
+// --- Sistema de Logs ---
+function logToFile(level, message, error = null) {
+    const timestamp = new Date().toISOString();
+    let logMsg = `[${timestamp}] [${level}] ${message}`;
+    if (error) {
+        logMsg += `\nError details: ${error.stack || error.message || error}`;
+    }
+    logMsg += '\n';
+    try {
+        fs.appendFileSync(LOG_PATH, logMsg);
+    } catch (e) {
+        console.error('Failed to write to log file:', e);
+    }
+    // Also log to console
+    if (level === 'ERROR') {
+        console.error(message, error || '');
+    } else if (level === 'WARN') {
+        console.warn(message, error || '');
+    } else {
+        console.log(message, error || '');
+    }
+}
 
 async function authenticate() {
     if (!fs.existsSync(CREDENTIALS_PATH)) {
-        console.error('--- ERROR: credentials.json NO ENCONTRADO ---');
-        console.error('Para obtenerlo:');
-        console.error('1. Ve a https://console.cloud.google.com/');
-        console.error('2. Crea un proyecto y habilita la API de Google Tasks.');
-        console.error('3. Ve a "APIs & Services" > "Credentials".');
-        console.error('4. Haz clic en "Create Credentials" > "OAuth client ID".');
-        console.error('5. Selecciona "Desktop App" y dale un nombre.');
-        console.error('6. Descarga el JSON y guárdalo como "credentials.json" en esta carpeta.');
+        const errorText = '--- ERROR: credentials.json NO ENCONTRADO ---\nPara obtenerlo:\n1. Ve a https://console.cloud.google.com/\n2. Crea un proyecto y habilita la API de Google Tasks.\n3. Ve a "APIs & Services" > "Credentials".\n4. Haz clic en "Create Credentials" > "OAuth client ID".\n5. Selecciona "Desktop App" y dale un nombre.\n6. Descarga el JSON y guárdalo como "credentials.json" en esta carpeta.';
+        logToFile('ERROR', errorText);
         return;
     }
 
@@ -40,25 +58,23 @@ async function authenticate() {
         prompt: 'consent' // Forzar consentimiento para asegurar el refresh token
     });
 
-    console.log('--- PASO 1: Copia esta URL en tu navegador ---');
-    console.log(authUrl);
-    console.log('--------------------------------------------');
+    logToFile('INFO', `--- PASO 1: Copia esta URL en tu navegador o espera a que se abra automáticamente ---\n${authUrl}\n--------------------------------------------`);
     
     // Intentar abrir automáticamente, pero si falla el enlace está arriba
     opener(authUrl);
 
-    console.log(`--- PASO 2: Escuchando en ${redirectUri} para recibir el código... ---`);
+    logToFile('INFO', `--- PASO 2: Escuchando en ${redirectUri} para recibir el código... ---`);
 
     const server = http.createServer(async (req, res) => {
         const fullUrl = `http://localhost:3000${req.url}`;
-        console.log(`Petición recibida en el servidor: ${fullUrl}`);
+        logToFile('INFO', `Petición recibida en el servidor: ${fullUrl}`);
         
         try {
             const urlParsed = new URL(fullUrl);
             const code = urlParsed.searchParams.get('code');
 
             if (code) {
-                console.log('Código detectado. Canjeando por tokens...');
+                logToFile('INFO', 'Código de autorización detectado. Canjeando por tokens...');
                 
                 res.writeHead(200, { 'Content-Type': 'text/html' });
                 res.end('<h1>Autenticacion exitosa!</h1><p>Ya puedes volver a la terminal.</p>');
@@ -66,9 +82,9 @@ async function authenticate() {
                 const { tokens } = await oauth2Client.getToken(code);
                 fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
                 
-                console.log('--- EXITO: Token guardado en token.json ---');
+                logToFile('INFO', '--- EXITO: Token guardado en token.json ---');
                 server.close(() => {
-                    console.log('Servidor de autenticación cerrado.');
+                    logToFile('INFO', 'Servidor de autenticación cerrado.');
                     process.exit(0);
                 });
             } else {
@@ -76,12 +92,12 @@ async function authenticate() {
                 res.end('Esperando el codigo de Google (no se detecto "code" en la URL)...');
             }
         } catch (e) {
-            console.error('Error procesando el callback:', e);
+            logToFile('ERROR', 'Error procesando el callback de OAuth:', e);
             res.writeHead(500);
             res.end('Error interno.');
         }
     }).listen(3000, () => {
-        console.log('Servidor local iniciado en puerto 3000.');
+        logToFile('INFO', 'Servidor local iniciado en puerto 3000.');
     });
 }
 

@@ -10,7 +10,31 @@ const path = require('path');
 // El usuario debe proporcionar credentials.json descargado de Google Cloud Console.
 const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json');
 const TOKEN_PATH = path.join(__dirname, 'token.json');
+const LOG_PATH = path.join(__dirname, 'plugin.log');
 const SCOPES = ['https://www.googleapis.com/auth/tasks'];
+
+// --- Sistema de Logs ---
+function logToFile(level, message, error = null) {
+    const timestamp = new Date().toISOString();
+    let logMsg = `[${timestamp}] [${level}] ${message}`;
+    if (error) {
+        logMsg += `\nError details: ${error.stack || error.message || error}`;
+    }
+    logMsg += '\n';
+    try {
+        fs.appendFileSync(LOG_PATH, logMsg);
+    } catch (e) {
+        console.error('Failed to write to log file:', e);
+    }
+    // Also log to console
+    if (level === 'ERROR') {
+        console.error(message, error || '');
+    } else if (level === 'WARN') {
+        console.warn(message, error || '');
+    } else {
+        console.log(message, error || '');
+    }
+}
 
 // --- Argumentos de Stream Deck ---
 const args = process.argv;
@@ -19,6 +43,9 @@ const uuid = args[args.findIndex(a => a === '-pluginUUID') + 1];
 const registerEvent = args[args.findIndex(a => a === '-registerEvent') + 1];
 
 let ws = new WebSocket(`ws://127.0.0.1:${port}`);
+ws.on('error', (err) => {
+    logToFile('ERROR', `WebSocket error: ${err.message}`, err);
+});
 let actions = new Map(); // Mapa para seguir las instancias de acciones y sus configuraciones
 let currentTasksData = new Map(); // Mapa para guardar los datos de la tarea actual por context
 let isAuthenticating = false;
@@ -34,7 +61,7 @@ function enqueueAction(actionFn) {
             await actionFn();
             await sleep(50);
         } catch (e) {
-            console.error('Error in enqueued action:', e);
+            logToFile('ERROR', 'Error in enqueued action:', e);
         }
     });
 }
@@ -44,22 +71,22 @@ function triggerAutoAuth() {
     if (isAuthenticating) return;
     isAuthenticating = true;
 
-    console.warn('[Auth] Detectado token inválido. Iniciando recuperación automática...');
+    logToFile('WARN', '[Auth] Detectado token inválido. Iniciando recuperación automática...');
 
     // Notificar al usuario proactivamente
     const zenityCmd = `zenity --info --title="Google Tasks" --text="Tu sesión de Google ha expirado.\n\nSe abrirá el navegador automáticamente para que vuelvas a iniciar sesión y restaurar la conexión." --timeout=30`;
     
     exec(zenityCmd, () => {
-        console.log('[Auth] Lanzando auth-helper.js...');
+        logToFile('INFO', '[Auth] Lanzando auth-helper.js...');
         
         // Ejecutar el script de ayuda
         exec('node auth-helper.js', async (error, stdout, stderr) => {
             isAuthenticating = false;
             if (error) {
-                console.error(`[Auth] Error el auto-auth: ${error.message}`);
+                logToFile('ERROR', `[Auth] Error en auto-auth. Code: ${error.code}. Stderr: ${stderr}. Stdout: ${stdout}`, error);
                 return;
             }
-            console.log('[Auth] Re-autenticación completada. Refrescando botones secuencialmente...');
+            logToFile('INFO', `[Auth] Re-autenticación completada. Stdout: ${stdout}`);
             
             // Refrescar todos los botones activos de forma SECUENCIAL para evitar SEGV en Node 22
             for (const [context, settings] of actions.entries()) {
@@ -71,55 +98,78 @@ function triggerAutoAuth() {
 
 // --- Lógica de Autenticación de Google ---
 async function getAuthenticatedClient() {
-    if (cachedAuthClient) return cachedAuthClient;
+    if (cachedAuthClient) return { client: cachedAuthClient };
 
     if (!fs.existsSync(CREDENTIALS_PATH)) {
-        console.error('--- ERROR: credentials.json NO ENCONTRADO ---');
-        console.error('1. Ve a https://console.cloud.google.com/');
-        console.error('2. Habilita "Google Tasks API".');
-        console.error('3. Crea un "OAuth 2.0 Client ID" (Desktop).');
-        console.error('4. Descarga el JSON y renombralo a "credentials.json" en esta carpeta.');
-        return null;
+        return { client: null, error: 'CREDENTIALS_MISSING' };
     }
-    const content = fs.readFileSync(CREDENTIALS_PATH);
-    const keys = JSON.parse(content);
-    const key = keys.installed || keys.web;
+
+    let key;
+    try {
+        const content = fs.readFileSync(CREDENTIALS_PATH, 'utf8');
+        if (!content.trim()) {
+            return { client: null, error: 'CREDENTIALS_EMPTY' };
+        }
+        const keys = JSON.parse(content);
+        key = keys.installed || keys.web;
+        if (!key || !key.client_id || !key.client_secret) {
+            return { client: null, error: 'CREDENTIALS_INVALID' };
+        }
+    } catch (err) {
+        return { client: null, error: 'CREDENTIALS_PARSE_ERROR', details: err };
+    }
+
     const auth = new OAuth2Client(key.client_id, key.client_secret, key.redirect_uris[0]);
 
     if (fs.existsSync(TOKEN_PATH)) {
-        const token = fs.readFileSync(TOKEN_PATH);
-        auth.setCredentials(JSON.parse(token));
+        try {
+            const tokenContent = fs.readFileSync(TOKEN_PATH, 'utf8');
+            if (!tokenContent.trim()) {
+                return { client: null, error: 'TOKEN_EMPTY' };
+            }
+            const token = JSON.parse(tokenContent);
+            auth.setCredentials(token);
 
-        // Listener para guardar el token si Google lo refresca automáticamente
-        auth.on('tokens', (tokens) => {
-            console.log('[Auth] Token refrescado automáticamente, guardando...');
-            const currentToken = JSON.parse(fs.readFileSync(TOKEN_PATH));
-            const updatedToken = { ...currentToken, ...tokens };
-            fs.writeFileSync(TOKEN_PATH, JSON.stringify(updatedToken));
-        });
+            // Listener para guardar el token si Google lo refresca automáticamente
+            auth.on('tokens', (tokens) => {
+                logToFile('INFO', '[Auth] Token refrescado automáticamente, guardando...');
+                try {
+                    let currentToken = {};
+                    if (fs.existsSync(TOKEN_PATH)) {
+                        const existingContent = fs.readFileSync(TOKEN_PATH, 'utf8');
+                        if (existingContent.trim()) {
+                            currentToken = JSON.parse(existingContent);
+                        }
+                    }
+                    const updatedToken = { ...currentToken, ...tokens };
+                    fs.writeFileSync(TOKEN_PATH, JSON.stringify(updatedToken));
+                } catch (err) {
+                    logToFile('ERROR', '[Auth] Error al guardar el token refrescado automáticamente', err);
+                }
+            });
 
-        cachedAuthClient = auth;
-        return auth;
+            cachedAuthClient = auth;
+            return { client: auth };
+        } catch (err) {
+            return { client: null, error: 'TOKEN_PARSE_ERROR', details: err };
+        }
     }
 
-    // Si no hay token, el plugin debería manejar el flujo, pero para simplificar
-    // instruimos al usuario a generar el token inicialmente.
-    console.error('Error: token.json no encontrado. Ejecuta un script de autenticación primero.');
-    return null;
+    return { client: null, error: 'TOKEN_MISSING' };
 }
 
 // --- Lógica de Renderizado Canvas ---
-function drawTaskImage(text, settings) {
+function drawTaskImage(text, settings, isError = false) {
     const { fontFamily = 'Verdana', fontSize = 12, maxCharsPerLine = 10 } = settings;
     const canvas = createCanvas(72, 72);
     const ctx = canvas.getContext('2d');
 
-    // Fondo negro
-    ctx.fillStyle = '#000000';
+    // Fondo negro, o rojo oscuro si es un error
+    ctx.fillStyle = isError ? '#3d0a0a' : '#000000';
     ctx.fillRect(0, 0, 72, 72);
 
-    // Configuración de texto
-    ctx.fillStyle = '#FFFFFF';
+    // Configuración de texto: blanco, o rojo brillante si es un error
+    ctx.fillStyle = isError ? '#ff5555' : '#FFFFFF';
     ctx.font = `${fontSize}px "${fontFamily}"`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -147,9 +197,35 @@ let lastRenderedData = new Map(); // Cache para evitar re-renderizados innecesar
 
 // --- Lógica de Negocio: Obtener Tarea ---
 async function updateTask(context, settings, force = false) {
-    const auth = await getAuthenticatedClient();
-    if (!auth) return;
+    const authResult = await getAuthenticatedClient();
+    if (!authResult.client) {
+        let errorMsg = 'Error Auth';
+        if (authResult.error === 'CREDENTIALS_MISSING') {
+            errorMsg = 'Falta credentials.json';
+        } else if (authResult.error === 'CREDENTIALS_EMPTY') {
+            errorMsg = 'credentials.json vacio';
+        } else if (authResult.error === 'CREDENTIALS_INVALID' || authResult.error === 'CREDENTIALS_PARSE_ERROR') {
+            errorMsg = 'Error credentials.json';
+        } else if (authResult.error === 'TOKEN_MISSING') {
+            errorMsg = 'Falta token.json';
+        } else if (authResult.error === 'TOKEN_EMPTY') {
+            errorMsg = 'token.json vacio';
+        } else if (authResult.error === 'TOKEN_PARSE_ERROR') {
+            errorMsg = 'Error token.json';
+        }
 
+        logToFile('WARN', `[updateTask] Error de autenticación: ${errorMsg}`, authResult.details);
+
+        const base64Image = drawTaskImage(errorMsg, settings, true);
+        ws.send(JSON.stringify({
+            event: 'setImage',
+            context: context,
+            payload: { image: `data:image/png;base64,${base64Image}`, target: 0 }
+        }));
+        return;
+    }
+
+    const auth = authResult.client;
     const tasksClient = tasks({ version: 'v1', auth });
     const taskIndex = parseInt(settings.taskIndex || 1) - 1;
     const listId = settings.listId || null;
@@ -247,25 +323,53 @@ async function updateTask(context, settings, force = false) {
         lastRenderedData.set(context, cacheKey);
 
     } catch (err) {
-        console.error('Error al obtener tareas:', err);
+        logToFile('ERROR', 'Error al obtener tareas:', err);
+        let errorMsg = 'Error API';
         if (err.message && err.message.includes('invalid_grant')) {
             cachedAuthClient = null;
             triggerAutoAuth();
+            errorMsg = 'Reauth';
+        } else if (err.message && (err.message.includes('ENOTFOUND') || err.message.includes('EAI_AGAIN') || err.message.includes('fetch failed'))) {
+            errorMsg = 'Sin red';
+        } else if (err.status === 403) {
+            errorMsg = 'Sin permiso';
+        } else if (err.status === 404) {
+            errorMsg = 'No lista';
         }
+
+        const base64Image = drawTaskImage(errorMsg, settings, true);
+        ws.send(JSON.stringify({
+            event: 'setImage',
+            context: context,
+            payload: { image: `data:image/png;base64,${base64Image}`, target: 0 }
+        }));
     }
 }
 
 async function fetchAndSendLists(context) {
-    const auth = await getAuthenticatedClient();
-    if (!auth) {
+    const authResult = await getAuthenticatedClient();
+    if (!authResult.client) {
+        let errorMsg = 'No se pudo autenticar.';
+        if (authResult.error === 'CREDENTIALS_MISSING') {
+            errorMsg = 'Falta credentials.json';
+        } else if (authResult.error === 'TOKEN_MISSING') {
+            errorMsg = 'Falta token.json';
+        } else if (authResult.error === 'TOKEN_EMPTY' || authResult.error === 'TOKEN_PARSE_ERROR') {
+            errorMsg = 'token.json corrupto o vacio';
+        } else if (authResult.error === 'CREDENTIALS_INVALID' || authResult.error === 'CREDENTIALS_PARSE_ERROR') {
+            errorMsg = 'credentials.json corrupto o vacio';
+        }
+        
         ws.send(JSON.stringify({
             event: 'sendToPropertyInspector',
             context: context,
-            payload: { error: 'No se pudo autenticar.' }
+            payload: { error: errorMsg }
         }));
+        logToFile('WARN', `[fetchAndSendLists] ${errorMsg}`, authResult.details);
         return;
     }
 
+    const auth = authResult.client;
     try {
         const tasksClient = tasks({ version: 'v1', auth });
         const res = await tasksClient.tasklists.list();
@@ -279,7 +383,7 @@ async function fetchAndSendLists(context) {
             }
         }));
     } catch (err) {
-        console.error('Error al obtener listas:', err);
+        logToFile('ERROR', 'Error al obtener listas:', err);
         let errorMsg = 'Error al obtener listas: ' + err.message;
         
         if (err.message && err.message.includes('invalid_grant')) {
@@ -334,7 +438,7 @@ ws.on('message', async (data) => {
 
         // Si no hay datos, intentamos un refresco inmediato antes de fallar
         if (!taskData) {
-            console.log(`[keyDown] Datos no encontrados para ${context}, intentando updateTask...`);
+            logToFile('INFO', `[keyDown] Datos no encontrados para ${context}, intentando updateTask...`);
             await new Promise(resolve => {
                 enqueueAction(async () => {
                     await updateTask(context, settings, true);
@@ -355,10 +459,10 @@ ws.on('message', async (data) => {
 
         exec(cmd, async (err, stdout) => {
             const result = stdout.trim();
-            console.log(`[Zenity] Salida del diálogo: "${result}"`);
+            logToFile('INFO', `[Zenity] Salida del diálogo: "${result}"`);
 
             if (err && !result) {
-                console.log(`[Zenity] Diálogo cancelado o error real: ${err.message}`);
+                logToFile('INFO', `[Zenity] Diálogo cancelado o error real: ${err.message}`);
                 return;
             }
             
@@ -367,19 +471,19 @@ ws.on('message', async (data) => {
 
             if (result === 'Completada') {
                 finalStatus = 'completed';
-                console.log(`[Update] Marcando tarea como COMPLETADA: ${taskData.id}`);
+                logToFile('INFO', `[Update] Marcando tarea como COMPLETADA: ${taskData.id}`);
             } else if (result) {
                 newTitle = result;
-                console.log(`[Update] Actualizando título a: "${newTitle}" para la tarea: ${taskData.id}`);
+                logToFile('INFO', `[Update] Actualizando título a: "${newTitle}" para la tarea: ${taskData.id}`);
             } else {
                 return; // Caso borde
             }
             
-            const auth = await getAuthenticatedClient();
-            if (auth) {
+            const authResult = await getAuthenticatedClient();
+            if (authResult.client) {
                 try {
-                    const tasksClient = tasks({ version: 'v1', auth });
-                    console.log(`[API] Llamando a tasks.patch para tasklist: ${taskData.listId}, task: ${taskData.id}`);
+                    const tasksClient = tasks({ version: 'v1', auth: authResult.client });
+                    logToFile('INFO', `[API] Llamando a tasks.patch para tasklist: ${taskData.listId}, task: ${taskData.id}`);
                     const patchRes = await tasksClient.tasks.patch({
                         tasklist: taskData.listId,
                         task: taskData.id,
@@ -389,7 +493,7 @@ ws.on('message', async (data) => {
                             completed: finalStatus === 'completed' ? new Date().toISOString() : null
                         }
                     });
-                    console.log(`[API] Respuesta de Google Tasks: ${patchRes.status} ${patchRes.statusText}`);
+                    logToFile('INFO', `[API] Respuesta de Google Tasks: ${patchRes.status} ${patchRes.statusText}`);
                     
                     // Forzar actualización del icono
                     const settings = actions.get(context) || {};
@@ -401,11 +505,11 @@ ws.on('message', async (data) => {
                         errorMsg = 'Error: Sesión expirada. Re-autentica en el navegador.';
                         triggerAutoAuth();
                     }
-                    console.error(`[API] Error al actualizar:`, e.response ? e.response.data : e.message);
+                    logToFile('ERROR', `[API] Error al actualizar:`, e.response ? e.response.data : e.message);
                     exec(`zenity --error --title="Google Tasks" --text="Error al actualizar: ${errorMsg}"`);
                 }
             } else {
-                console.error(`[Auth] No se pudo obtener el cliente autenticado.`);
+                logToFile('ERROR', `[Auth] No se pudo obtener el cliente autenticado.`);
             }
         });
     }
