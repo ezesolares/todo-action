@@ -2,6 +2,7 @@
 set -e
 
 PLUGIN_DIR="me.innovatewith.googletasks.sdPlugin"
+OPENDECK_PLUGINS_DIR="/home/scofmb/.config/opendeck/plugins"
 
 echo "=== Iniciando construcción del plugin ==="
 
@@ -41,3 +42,11 @@ cd "$PLUGIN_DIR"
 npm install --production
 
 echo "=== Construcción finalizada con éxito en $PLUGIN_DIR/ ==="
+
+if [ "$1" = "install" ]; then
+    echo "Instalando en OpenDeck..."
+    mkdir -p "$OPENDECK_PLUGINS_DIR"
+    rm -rf "$OPENDECK_PLUGINS_DIR/$PLUGIN_DIR"
+    cp -r "../$PLUGIN_DIR" "$OPENDECK_PLUGINS_DIR/"
+    echo "¡Instalado correctamente en $OPENDECK_PLUGINS_DIR/$PLUGIN_DIR!"
+fi

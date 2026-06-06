@@ -22,8 +22,22 @@ let ws = new WebSocket(`ws://127.0.0.1:${port}`);
 let actions = new Map(); // Mapa para seguir las instancias de acciones y sus configuraciones
 let currentTasksData = new Map(); // Mapa para guardar los datos de la tarea actual por context
 let isAuthenticating = false;
+let cachedAuthClient = null; // Cache del cliente de Google Auth
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- Cola de Ejecución Secuencial para evitar SEGV de Canvas ---
+let actionQueue = Promise.resolve();
+function enqueueAction(actionFn) {
+    actionQueue = actionQueue.then(async () => {
+        try {
+            await actionFn();
+            await sleep(50);
+        } catch (e) {
+            console.error('Error in enqueued action:', e);
+        }
+    });
+}
 
 // --- Automatización de Re-autenticación ---
 function triggerAutoAuth() {
@@ -49,8 +63,7 @@ function triggerAutoAuth() {
             
             // Refrescar todos los botones activos de forma SECUENCIAL para evitar SEGV en Node 22
             for (const [context, settings] of actions.entries()) {
-                await updateTask(context, settings, true);
-                await sleep(100); // Pequeña pausa para liberar presión de memoria
+                enqueueAction(() => updateTask(context, settings, true));
             }
         });
     });
@@ -58,6 +71,8 @@ function triggerAutoAuth() {
 
 // --- Lógica de Autenticación de Google ---
 async function getAuthenticatedClient() {
+    if (cachedAuthClient) return cachedAuthClient;
+
     if (!fs.existsSync(CREDENTIALS_PATH)) {
         console.error('--- ERROR: credentials.json NO ENCONTRADO ---');
         console.error('1. Ve a https://console.cloud.google.com/');
@@ -83,6 +98,7 @@ async function getAuthenticatedClient() {
             fs.writeFileSync(TOKEN_PATH, JSON.stringify(updatedToken));
         });
 
+        cachedAuthClient = auth;
         return auth;
     }
 
@@ -233,6 +249,7 @@ async function updateTask(context, settings, force = false) {
     } catch (err) {
         console.error('Error al obtener tareas:', err);
         if (err.message && err.message.includes('invalid_grant')) {
+            cachedAuthClient = null;
             triggerAutoAuth();
         }
     }
@@ -266,6 +283,7 @@ async function fetchAndSendLists(context) {
         let errorMsg = 'Error al obtener listas: ' + err.message;
         
         if (err.message && err.message.includes('invalid_grant')) {
+            cachedAuthClient = null;
             errorMsg = 'Error: Sesión expirada. Iniciando recuperación automática...';
             triggerAutoAuth();
         }
@@ -293,21 +311,21 @@ ws.on('message', async (data) => {
     if (event === 'willAppear') {
         const settings = payload.settings || {};
         actions.set(context, settings);
-        updateTask(context, settings, true); // Forzar renderizado inicial
+        enqueueAction(() => updateTask(context, settings, true)); // Forzar renderizado inicial
     }
 
     if (event === 'didReceiveSettings') {
         const settings = payload.settings;
         actions.set(context, settings);
-        updateTask(context, settings, true); // Forzar cuando se cambian ajustes
+        enqueueAction(() => updateTask(context, settings, true)); // Forzar cuando se cambian ajustes
     }
 
     if (event === 'propertyInspectorDidAppear') {
-        fetchAndSendLists(context);
+        enqueueAction(() => fetchAndSendLists(context));
     }
 
     if (event === 'sendToPlugin' && payload && payload.action === 'refreshLists') {
-        fetchAndSendLists(context);
+        enqueueAction(() => fetchAndSendLists(context));
     }
 
     if (event === 'keyDown') {
@@ -317,7 +335,12 @@ ws.on('message', async (data) => {
         // Si no hay datos, intentamos un refresco inmediato antes de fallar
         if (!taskData) {
             console.log(`[keyDown] Datos no encontrados para ${context}, intentando updateTask...`);
-            await updateTask(context, settings, true);
+            await new Promise(resolve => {
+                enqueueAction(async () => {
+                    await updateTask(context, settings, true);
+                    resolve();
+                });
+            });
             taskData = currentTasksData.get(context);
         }
 
@@ -370,10 +393,11 @@ ws.on('message', async (data) => {
                     
                     // Forzar actualización del icono
                     const settings = actions.get(context) || {};
-                    updateTask(context, settings, true);
+                    enqueueAction(() => updateTask(context, settings, true));
                 } catch (e) {
                     let errorMsg = e.message;
                     if (e.message && e.message.includes('invalid_grant')) {
+                        cachedAuthClient = null;
                         errorMsg = 'Error: Sesión expirada. Re-autentica en el navegador.';
                         triggerAutoAuth();
                     }
@@ -388,9 +412,8 @@ ws.on('message', async (data) => {
 });
 
 // Polling cada 1 minuto - Procesado secuencial para estabilidad
-setInterval(async () => {
+setInterval(() => {
     for (const [context, settings] of actions.entries()) {
-        await updateTask(context, settings);
-        await sleep(50); // Pausa breve entre refrescos
+        enqueueAction(() => updateTask(context, settings));
     }
 }, 1 * 60 * 1000);
